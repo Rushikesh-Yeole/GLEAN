@@ -142,7 +142,6 @@ async def report(doc_id: str, current_user: dict = Depends(decodeUser)):
     
     if document.get("state") != "processing":
         return {
-            "state": document.get("report"),
             "summary": document.get("summary"),
             "clauses": document.get("clauses"),
             "riskScore": document.get("riskScore"),
