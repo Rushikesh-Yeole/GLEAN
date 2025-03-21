@@ -27,6 +27,10 @@ class AuthData(BaseModel):
     email: str
     password: str
 
+@app.head("/")
+async def head_root():
+    return Response(status_code=200)
+
 @app.get("/")
 async def root():
     return {"message": "GLEAN backend is up"}
