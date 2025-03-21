@@ -1,6 +1,7 @@
 import asyncio
 import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from bson import ObjectId
 from pymongo import MongoClient
@@ -25,9 +26,30 @@ app = FastAPI()
 SECRET_KEY = os.getenv("JWT")
 ALGORITHM = "HS256"
 
+origins = [
+    "http://localhost:5173",
+    "https://glean-frontend.com",
+]
+
+#CORS 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class AuthData(BaseModel):
     email: str
     password: str
+
+class ChatRequest(BaseModel):
+    doc_id: str
+
+class AskRequest(BaseModel):
+    doc_id: str
+    query: str
 
 @app.head("/")
 async def head_root():
@@ -154,23 +176,23 @@ async def report(doc_id: str, current_user: dict = Depends(decodeUser)):
         return Response(status_code=204)
 
 @app.post("/ask")
-async def ask_chatbot(doc_id: str, query: str):
+async def ask_chatbot(request: AskRequest):
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(os.getenv("ML_BE") + "/ask", json={"query": query})
+            response = await client.post(os.getenv("ML_BE") + "/ask", json={"query": request.query})
             response.raise_for_status()
             data = response.json()
             answer = data.get("answer", "ML backend not responding")
             
-            docColn.update_one({"_id": ObjectId(doc_id)}, {"$push": {"chat": {"query": query, "answer": answer}}})
+            docColn.update_one({"_id": ObjectId(request.doc_id)}, {"$push": {"chat": {"query": request.query, "answer": answer}}})
             
             return {"answer": answer}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error communicating with ML backend: {e}")
-
+    
 @app.post("/chat")
-async def getChat(doc_id: str):
-    doc = docColn.find_one({"_id": ObjectId(doc_id)})
+async def getChat(request: ChatRequest):
+    doc = docColn.find_one({"_id": ObjectId(request.doc_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return {"chat": doc.get("chat", [])}
