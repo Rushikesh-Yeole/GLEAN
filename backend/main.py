@@ -1,3 +1,5 @@
+import asyncio
+import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header, Response
 from pydantic import BaseModel
 from bson import ObjectId
@@ -61,47 +63,69 @@ def decodeUser(authorization: str = Header(...)):
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
+# process pdf
+async def process(doc_id: str, pdf: bytes):
+    try:
+        async with httpx.AsyncClient() as client:
+            file = {'file': ('document.pdf', pdf, 'application/pdf')}
+            response = await client.post(os.getenv("ML_BE") + "/upload", files=file)
+            response.raise_for_status()
+            data = response.json()
+            if data:
+                docColn.update_one(
+                    {"_id": ObjectId(doc_id)},
+                    {   "$set": {
+                        "state": "processed",
+                        "summary": data.get("summary", None),
+                        "clauses": data.get("clauses", None),
+                        "riskScore": data.get("riskScore", None),
+                        "riskFactors": data.get("riskFactors", None),
+                        "insights": data.get("insights", None),
+                        "entities": data.get("entities", None),
+                        }})
+    except Exception as e:
+        print(f"Error processing document {doc_id}: {e}")
+
 # upload doc pdf
 @app.post("/doc")
-async def upload_file(file: UploadFile = File(...), current_user: dict = Depends(decodeUser)):
+async def uploadDoc(file: UploadFile = File(...), current_user: dict = Depends(decodeUser)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    content = await file.read()
-    # Limit file size to 10MB
-    if len(content) > 10 * 1024 * 1024:
+    file = await file.read()
+    if len(file) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large (max 10MB)")
     
-    # PDF to text
     try:
-        doc = fitz.open(stream=content, filetype="pdf")
+        file = fitz.open(stream=file, filetype="pdf")
     except Exception:
         raise HTTPException(status_code=400, detail="Error processing PDF file")
 
     extracted_text = ""
-    for page in doc:
+    for page in file:
         extracted_text += page.get_text()
-    doc.close()
+    file.close()
     
     cleaned_text = cleanText(extracted_text)
     
     document = {
-        "pdf": content,
-        "extract": cleaned_text,
-        "state": "processing", 
+        "pdf": file,
+        "state": "processing",
         "summary": None,
         "clauses": None,
-        "risk_score": None,
-        "risk_factors": None,
-        "actionable_insights": None,
-        "entity_info": None
+        "riskScore": None,
+        "riskFactors": None,
+        "insights": None,
+        "entities": None
     }
     result = docColn.insert_one(document)
     doc_id = str(result.inserted_id)
     
     userColn.update_one({"email": current_user["email"]}, {"$push": {"docs": doc_id}})
     
+    asyncio.create_task(process(doc_id, file))
+    
     return {"document_id": doc_id}
-
+ 
 @app.get("/user/docs")
 async def get_user_docs(current_user: dict = Depends(decodeUser)):
     docs = current_user.get("docs", [])
@@ -116,15 +140,38 @@ async def report(doc_id: str, current_user: dict = Depends(decodeUser)):
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    if document.get("state") == "processed":
+    if document.get("state") != "processing":
         return {
+            "state": document.get("report"),
             "summary": document.get("summary"),
             "clauses": document.get("clauses"),
-            "risk_score": document.get("risk_score"),
-            "risk_factors": document.get("risk_factors"),
-            "actionable_insights": document.get("actionable_insights"),
-            "entity_info": document.get("entity_info"),
+            "riskScore": document.get("riskScore"),
+            "riskFactors": document.get("riskFactors"),
+            "insights": document.get("insights"),
+            "entities": document.get("entities"),
             "pdf": document.get("pdf")
         }
     else:
         return Response(status_code=204)
+
+@app.post("/ask")
+async def ask_chatbot(doc_id: str, query: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(os.getenv("ML_BE") + "/ask", json={"query": query})
+            response.raise_for_status()
+            data = response.json()
+            answer = data.get("answer", "ML backend not responding")
+            
+            docColn.update_one({"_id": ObjectId(doc_id)}, {"$push": {"chat": {"query": query, "answer": answer}}})
+            
+            return {"answer": answer}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error communicating with ML backend: {e}")
+
+@app.post("/chat")
+async def getChat(doc_id: str):
+    doc = docColn.find_one({"_id": ObjectId(doc_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"chat": doc.get("chat", [])}
