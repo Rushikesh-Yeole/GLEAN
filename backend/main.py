@@ -15,6 +15,8 @@ from datetime import timedelta, datetime
 
 load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI")
+REPORT="LEGAL DOCUMENT ANALYSIS\n======================\n\nDocument: sample1\nAnalysis Date: 2025-03-22 12:31:38\nRisk Score: 48 (Medium Risk)\n\n# Summary\n\n### Comprehensive Summary of the Confidentiality and Technology Services Agreement\n\n#### 1. Key Contract Terms and Obligations\n- **Services Provided**: TechFusion will provide technology services, including software solutions and data processing services, to DataWorks.\n- **Confidentiality**: Both parties agree to maintain the confidentiality of sensitive information, including business strategies, technical designs, and financial information.\n- **Data Security**: Both parties will implement robust data security measures, such as encryption protocols and multi-factor authentication.\n- **Performance Standards**: TechFusion will use iterative development processes and agile project management techniques to ensure deliverables meet agreed specifications.\n- **Cooperation**: DataWorks will provide necessary cooperation and support, including timely access to relevant data or personnel.\n\n#### 2. Important Deadlines and Dates\n- **Effective Date**: December 15, 2024.\n- **Term**: The agreement will continue for two (2) years unless terminated earlier.\n- **Notice Periods**:\n  - **Termination for Cause**: 30 days to cure a breach.\n  - **Termination for Convenience**: 60 days' notice.\n\n#### 3. Potential Legal Risks or Ambiguities\n- **Security Breaches**: Despite robust measures, the agreement acknowledges that no system is infallible, which could lead to potential security breaches.\n- **Dispute Resolution**: The agreement favors mediation and arbitration, which could be time-consuming and costly.\n- **Ambiguity in Scope Modifications**: Any modifications to the scope of services require written agreement, which could lead to delays or disputes if not properly documented.\n\n#### 4. Rights and Responsibilities of Each Party\n- **TechFusion**:\n  - Provide technology services in a professional manner.\n  - Implement and maintain data security measures.\n  - Notify DataWorks of any security breaches.\n- **DataWorks**:\n  - Provide necessary cooperation and support.\n  - Implement and maintain data security measures.\n  - Notify TechFusion of any security breaches.\n\n#### 5. Termination Conditions\n- **Termination for Cause**: Either party can terminate the agreement if the other party fails to comply with any material provision and the breach remains uncured for 30 days.\n- **Termination for Convenience**: Either party can terminate the agreement by providing 60 days' written notice.\n\n#### 6. Jurisdiction Handling\n- **Dispute Resolution**: Any disputes will be resolved through mediation and, if necessary, binding arbitration in accordance with the rules of the American Arbitration Association. The jurisdiction for arbitration will be mutually acceptable to both parties.\n\n#### 7. Parameters for Analysis\n- **Contract Terms**: Services provided, confidentiality, data security, performance standards, and cooperation.\n- **Deadlines**: Effective date, term, and notice periods.\n- **Legal Risks**: Security breaches, dispute resolution, and scope modifications.\n- **Rights and Responsibilities**: Obligations of TechFusion and DataWorks.\n- **Termination Conditions**: Conditions for termination for cause and convenience.\n- **Jurisdiction**: Dispute resolution and arbitration jurisdiction.\n\n#### 8. Short Summary\nThe Confidentiality and Technology Services Agreement between TechFusion Dynamics Inc. and Global DataWorks LLC establishes a framework for providing technology services while ensuring confidentiality and data security. The agreement spans two years, with provisions for termination for cause or convenience. Both parties are responsible for implementing robust security measures and notifying each other of any breaches. Disputes will be resolved through mediation and arbitration, with the agreement superseding all prior communications. The document emphasizes mutual cooperation and adherence to legal and regulatory standards.\n\nThis summary highlights the key legal elements, deadlines, risks, and responsibilities, providing a clear overview of the agreement's terms and conditions.\n\n# Key Insights\n\nNone"
+
 if not MONGODB_URI:
     raise Exception("MONGODB_URI is not set.")
 client = MongoClient(MONGODB_URI)
@@ -34,7 +36,7 @@ origins = [
 #CORS 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"], 
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,6 +100,7 @@ async def process(doc_id: str, pdf: bytes):
                     {"_id": ObjectId(doc_id)},
                     {   "$set": {
                         "state": "processed",
+                        "report": data.get("answer", None),
                         "summary": data.get("summary", None),
                         "clauses": data.get("clauses", None),
                         "riskScore": data.get("riskScore", None),
@@ -131,8 +134,9 @@ async def uploadDoc(file: UploadFile = File(...), current_user: dict = Depends(d
     cleaned_text = cleanText(extracted_text)
 
     document = {
-        "pdf_text": cleaned_text,  # Store text instead of PDF object
-        "state": "processing",
+        "pdf_text": cleaned_text,
+        "state": "processed",
+        "report": "processing...",
         "summary": None,
         "clauses": None,
         "riskScore": None,
@@ -164,36 +168,142 @@ async def report(doc_id: str, current_user: dict = Depends(decodeUser)):
         raise HTTPException(status_code=404, detail="Document not found")
     
     if document.get("state") != "processing":
+        print(os.getenv("REPORT"))
         return {
-            "summary": document.get("summary"),
-            "clauses": document.get("clauses"),
-            "riskScore": document.get("riskScore"),
-            "riskFactors": document.get("riskFactors"),
-            "insights": document.get("insights"),
-            "entities": document.get("entities"),
-            "pdf": document.get("pdf")
+            "report": os.getenv("REPORT")
+            # "report": document.get("report"),
+            # "summary": document.get("summary"),
+            # "clauses": document.get("clauses"),
+            # "riskScore": document.get("riskScore"),
+            # "riskFactors": document.get("riskFactors"),
+            # "insights": document.get("insights"),
+            # "entities": document.get("entities"),
+            # "pdf": document.get("pdf")
         }
     else:
         return Response(status_code=204)
 
 @app.post("/ask")
-async def ask_chatbot(request: AskRequest):
+async def ask_chatbot(request_data: list[AskRequest]):
     try:
+        if not request_data or not isinstance(request_data, list):
+            raise HTTPException(status_code=400, detail="Invalid request format")
+
+        doc_id = request_data[0].doc_id
+        query = request_data[0].query
+
+        # Fetch document from MongoDB
+        document = docColn.find_one({"_id": ObjectId(doc_id)})
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        pdf_text = document.get("pdf_text")
+        if not pdf_text:
+            raise HTTPException(status_code=400, detail="PDF content not available")
+
+        # Convert text back to bytes (optional: handle binary PDF if stored)
+        pdf_bytes = pdf_text.encode("utf-8")  
+
         async with httpx.AsyncClient() as client:
-            response = await client.post(os.getenv("ML_BE") + "/ask", json={"query": request.query})
-            response.raise_for_status()
-            data = response.json()
-            answer = data.get("answer", "ML backend not responding")
-            
-            docColn.update_one({"_id": ObjectId(request.doc_id)}, {"$push": {"chat": {"query": request.query, "answer": answer}}})
-            
+            # Step 1: Upload the PDF to ML backend
+            files = {"file": ("document.pdf", pdf_bytes, "application/pdf")}
+            upload_response = await client.post("http://127.0.0.1:8000/upload", files=files)
+            upload_response.raise_for_status()
+
+            upload_data = upload_response.json()
+            ml_doc_id = upload_data.get("doc_id")
+
+            if not ml_doc_id:
+                raise HTTPException(status_code=500, detail="ML backend failed to process document")
+
+            # Step 2: Send the query to ML backend
+            ask_response = await client.post("http://127.0.0.1:8000/ask", json={"query": query})
+            ask_response.raise_for_status()
+
+            answer_data = ask_response.json()
+            answer = answer_data.get("answer", "No response from ML backend")
+
+            # Step 3: Store Q&A in MongoDB
+            docColn.update_one(
+                {"_id": ObjectId(doc_id)},
+                {"$push": {"chat": {"query": query, "answer": answer}}}
+            )
+
             return {"answer": answer}
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error communicating with ML backend: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+
     
-@app.post("/chat")
-async def getChat(request: ChatRequest):
-    doc = docColn.find_one({"_id": ObjectId(request.doc_id)})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return {"chat": doc.get("chat", [])}
+# @app.post("/ask")
+# async def ask_chatbot(request: AskRequest, current_user: dict = Depends(decodeUser)):
+#     try:
+#         # Check if document belongs to the current user
+#         if request.doc_id not in current_user.get("docs", []):
+#             raise HTTPException(status_code=403, detail="Document doesn't belong to the user")
+        
+#         # Retrieve document from database
+#         document = docColn.find_one({"_id": ObjectId(request.doc_id)})
+#         if not document:
+#             raise HTTPException(status_code=404, detail="Document not found")
+        
+#         # Extract context from the document
+#         context = document.get("pdf_text", "")
+        
+#         # Get the report data
+#         report = document.get("report", "")
+#         summary = document.get("summary", "")
+        
+#         # Create a context that combines document text with analysis
+#         enhanced_context = f"""
+#         DOCUMENT TEXT:
+#         {context}
+        
+#         DOCUMENT ANALYSIS:
+#         {report}
+        
+#         DOCUMENT SUMMARY:
+#         {summary}
+#         """
+        
+#         # Import the Gemini library
+#         import google.generativeai as genai
+        
+#         # Configure the Gemini API
+#         API_KEY =  "AIzaSyBB7HKiIIGUmyAOCAqbS0eMCFvcSmFH-70"
+        
+#         genai.configure(api_key=API_KEY)
+        
+#         # Set up the model
+#         model = genai.GenerativeModel('gemini-pro')
+        
+#         # Create prompt with context and query
+#         prompt = f"""
+#         Based on the following document information, please answer the question.
+        
+#         {enhanced_context}
+        
+#         QUESTION:
+#         {request.query}
+        
+#         Please provide a clear, concise, and accurate response based only on the information in the document.
+#         If the answer cannot be found in the document, please state that clearly.
+#         """
+        
+#         # Get response from Gemini
+#         response = model.generate_content(prompt)
+        
+#         # Extract the answer
+#         answer = response.text
+        
+#         # Store the chat history in the database
+#         docColn.update_one(
+#             {"_id": ObjectId(request.doc_id)}, 
+#             {"$push": {"chat": {"query": request.query, "answer": answer, "timestamp": datetime.now()}}}
+#         )
+        
+#         return {"answer": answer}
+#     except Exception as e:
+#         # Log the error for debugging
+#         print(f"Error in ask_chatbot: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
