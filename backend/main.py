@@ -113,24 +113,25 @@ async def process(doc_id: str, pdf: bytes):
 async def uploadDoc(file: UploadFile = File(...), current_user: dict = Depends(decodeUser)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    file = await file.read()
-    if len(file) > 10 * 1024 * 1024:
+
+    file_bytes = await file.read()
+    if len(file_bytes) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large (max 10MB)")
-    
+
     try:
-        file = fitz.open(stream=file, filetype="pdf")
+        pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception:
         raise HTTPException(status_code=400, detail="Error processing PDF file")
 
     extracted_text = ""
-    for page in file:
+    for page in pdf_doc:
         extracted_text += page.get_text()
-    file.close()
-    
+    pdf_doc.close()
+
     cleaned_text = cleanText(extracted_text)
-    
+
     document = {
-        "pdf": file,
+        "pdf_text": cleaned_text,  # Store text instead of PDF object
         "state": "processing",
         "summary": None,
         "clauses": None,
@@ -141,11 +142,11 @@ async def uploadDoc(file: UploadFile = File(...), current_user: dict = Depends(d
     }
     result = docColn.insert_one(document)
     doc_id = str(result.inserted_id)
-    
+
     userColn.update_one({"email": current_user["email"]}, {"$push": {"docs": doc_id}})
-    
-    asyncio.create_task(process(doc_id, file))
-    
+
+    asyncio.create_task(process(doc_id, file_bytes))  # Pass raw bytes
+
     return {"document_id": doc_id}
  
 @app.get("/user/docs")
